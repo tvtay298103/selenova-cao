@@ -1,0 +1,35 @@
+# Lượt cào. Nhịp đặt ở */15 * * * * (mỗi repo một khác — xem README của repo).
+#
+# ⚠️ `schedule` CHỈ chạy trên nhánh mặc định. Và GitHub TỰ TẮT lịch nếu repo
+# 60 ngày không có commit nào — nên repo im lâu quá là tuyến chết lặng, không
+# báo gì. shno1 canh chuyện đó bằng nhịp heartbeat riêng, không tin vào lịch này.
+#
+# Cron của Actions hay TRỄ 5-20' và có thể bị bỏ hẳn lúc hạ tầng GitHub bận.
+# Chấp nhận được: tin hoạt động sinh viên trễ 20' không mất giá trị. Nhưng đừng
+# đọc "đã tới giờ" thành "đã chạy" — chỉ log của shno1 mới nói được điều đó.
+name: cao
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: cao
+  cancel-in-progress: false
+
+jobs:
+  cao:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python cao.py
+        env:
+          NGUON_JSON: ${{ secrets.NGUON_JSON }}
+          N8N_URL: ${{ secrets.N8N_URL }}
+          N8N_TOKEN: ${{ secrets.N8N_TOKEN }}
