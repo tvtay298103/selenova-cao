@@ -1,18 +1,22 @@
-# Lượt cào. Nhịp đặt ở */15 * * * * (mỗi repo một khác — xem README của repo).
+# Worker cào FB "public" — bản chép của `worker/cao.py` trong repo selenova.
 #
-# ⚠️ `schedule` CHỈ chạy trên nhánh mặc định. Và GitHub TỰ TẮT lịch nếu repo
-# 60 ngày không có commit nào — nên repo im lâu quá là tuyến chết lặng, không
-# báo gì. shno1 canh chuyện đó bằng nhịp heartbeat riêng, không tin vào lịch này.
+# Repo public = phút Actions MIỄN PHÍ → gánh phần lớn page và cả bậc Playwright
+# (cao.py tự cài Chromium khi httpx bị đá login). Mỗi run một IP Azure mới.
 #
-# Cron của Actions hay TRỄ 5-20' và có thể bị bỏ hẳn lúc hạ tầng GitHub bận.
-# Chấp nhận được: tin hoạt động sinh viên trễ 20' không mất giá trị. Nhưng đừng
-# đọc "đã tới giờ" thành "đã chạy" — chỉ log của shno1 mới nói được điều đó.
+# NHỊP KHÔNG Ở ĐÂY. Không có `schedule:` — n8n (wf "FB cào 00 Nhịp") bấm
+# workflow_dispatch mỗi 15' và truyền danh sách nguồn qua input `nguon`
+# (đọc từ crawl_sources.cao_o='public'). Repo này KHÔNG giữ danh sách nguồn —
+# repo public thì secret cũng chỉ là chỗ giấu tạm, không giữ thì không lộ.
+#
+# Repo này KHÔNG giữ khoá Supabase/Telegram nào. Chỉ N8N_URL + N8N_TOKEN.
 name: cao
 
 on:
-  schedule:
-    - cron: "*/15 23,0-15 * * *"
   workflow_dispatch:
+    inputs:
+      nguon:
+        description: JSON array nguồn [{id, slug, name, kind, can_pw}] — n8n truyền vào
+        required: true
 
 concurrency:
   group: cao
@@ -21,7 +25,7 @@ concurrency:
 jobs:
   cao:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,6 +34,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python cao.py
         env:
-          NGUON_JSON: ${{ secrets.NGUON_JSON }}
+          CAO_WORKER: public
+          NGUON_JSON: ${{ inputs.nguon }}
           N8N_URL: ${{ secrets.N8N_URL }}
           N8N_TOKEN: ${{ secrets.N8N_TOKEN }}

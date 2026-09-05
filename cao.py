@@ -1,100 +1,219 @@
-"""cao.py — CÁI VÒI. Lấy trang Facebook, bóc bài, đẩy về n8n. Hết.
+"""cao.py — CÁI VÒI. Ghé page Facebook bằng khách vãng lai, gửi HTML THÔ về n8n. Hết.
 
-Chỗ này CỐ Ý KHÔNG BIẾT GÌ về dedup, scope, ai nhận tin. Nó không có sổ, không
-nhớ lượt trước, không nói chuyện với Supabase, không giữ khoá nào của hệ. Mất
-nguyên cái runner cũng không mất dữ liệu và không lộ gì.
+MỘT script, chạy ở BA nơi (đại tu 05/09/2026):
+  · repo public `selenova-cao` (GHA, IP Azure, phút Actions miễn phí)   — nhiều page nhất
+  · repo `selenova` private (GHA, cùng dải IP Azure, tốn phút)          — ít page hơn
+  · shno1 (IP FPT residential — hạ tầng khác thật)                      — 3 page
+Ba nơi làm ĐÚNG MỘT việc giống nhau. Chỗ này cố ý KHÔNG bóc, KHÔNG regex, KHÔNG sổ,
+KHÔNG khoá Supabase/Telegram. Bóc là việc của n8n (Code node "Bóc Story"), dedup là
+việc của bảng `fb_bai`, báo động là việc của n8n. Mất nguyên worker cũng không mất gì.
 
-Vì sao tách ra khỏi shno1 (04/09/2026): tuyến cào đứng trên IP nhà, và IP nhà
-là thứ đắt nhất trong hệ — mất nó là mất luôn khả năng đọc Facebook. Runner GHA
-mỗi lượt một IP mới, hỏng thì lượt sau tự lành, không có gì để mất.
+HAI ĐƯỜNG LẤY TRANG, thử theo thứ tự:
+  1. httpx thuần — header giả Chrome, jar cookie rỗng, GET facebook.com/<slug>.
+     Đo 05/09 trên 3 IP Azure: 17/17 page có username mở được, HTML ~1 MB chứa
+     đúng một khối `"__typename":"Story"` (bài mới nhất).
+  2. Playwright Chromium headless, vẫn KHÔNG login — chỉ khi (1) bị đẩy về /login.
+     Đo 05/09: page id-số (`profile.php?id=…`) httpx bị đá cả 3 dạng URL, Chromium
+     mở được. Page bật "phải đăng nhập" (KetnoiSvvaDn) thì cả hai đều thua → gói lỗi.
+  Cả hai đường đều thua ⇒ vẫn GỬI gói (loi + da_login + title) để n8n báo Tuấn.
 
-BIẾN MÔI TRƯỜNG (đặt bằng Actions secret, KHÔNG commit):
-  NGUON_JSON   JSON array các nguồn phải ghé lượt này. Để trong secret chứ không
-               để trong repo vì repo public thì danh sách page cũng public theo.
-  N8N_URL      webhook n8n nhận kết quả.
-  N8N_TOKEN    token chia sẻ, n8n đối chiếu để không ai khác đẩy rác vào.
+NGUỒN lấy từ đâu:
+  NGUON_JSON  (env) — JSON array [{id, slug, name, kind, duong_dan, can_pw}]; n8n
+              truyền vào input `nguon` của workflow_dispatch, hoặc để trong secret.
+  --tu-db     — shno1: đọc crawl_sources where cao_o='shno1' (cần .env Supabase).
 
-  python cao.py           # chạy thật, có đẩy
-  python cao.py --kho     # thử khô: cào thật, IN ra, KHÔNG đẩy
+Chạy:
+  python cao.py --kho            # cào thật, in tóm tắt, KHÔNG đẩy
+  python cao.py                  # đẩy về n8n (N8N_URL + N8N_TOKEN)
+  python cao.py --tu-db          # shno1: nguồn từ DB
+  python cao.py --luu DIR        # lưu HTML ra DIR để soi (kèm --kho)
 """
 from __future__ import annotations
 
 import json
 import os
+import random
+import subprocess
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
-import boc
+sys.stdout.reconfigure(encoding="utf-8")
+HERE = os.path.dirname(os.path.abspath(__file__))
+try:  # shno1 có .env; runner GHA không có, biến đi qua Actions env
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(HERE, ".env"))
+except ImportError:
+    pass
 
+VN = timezone(timedelta(hours=7))
+BASE = "https://www.facebook.com"
 HET_GIO = 30
+WORKER = os.environ.get("CAO_WORKER") or (
+    "private" if os.environ.get("GITHUB_REPOSITORY", "").endswith("/selenova")
+    else "public" if os.environ.get("GITHUB_ACTIONS") else "shno1")
+
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+# Đủ header trình duyệt — UA trần là FB trả 400 (dò 9/8). mbasic./m. đá về /login.
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8",
+    "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "sec-ch-ua": '"Chromium";v="126", "Not:A-Brand";v="24"',
+    "sec-ch-ua-mobile": "?0", "sec-ch-ua-platform": '"Windows"',
+}
 
 
+class FetchError(RuntimeError):
+    pass
+
+
+def _pause() -> None:
+    """Nghỉ giữa 2 page — để một lượt trông như người đọc lần lượt vài page."""
+    time.sleep(random.uniform(1.5, 4.0))
+
+
+def _duong_dan(src: dict) -> str:
+    """Phần sau facebook.com/ — ưu tiên `duong_dan`, rồi `slug`, rồi bóc từ `url`."""
+    d = src.get("duong_dan") or src.get("slug")
+    if not d and src.get("url"):
+        d = src["url"].split("facebook.com/", 1)[-1].strip("/")
+    return (d or "").strip("/")
+
+
+# ── đường 1: httpx ─────────────────────────────────────────────────────────────
 def mo_client() -> httpx.Client:
-    """Client khách. Jar RỖNG mỗi run — khác shno1, và cố ý.
-
-    shno1 giữ `datr` bền giữa các lượt vì ở đó cookie mới mỗi lượt sẽ thành 48
-    "người lạ" cùng đổ ra từ MỘT IP nhà, bất thường hơn một người đọc quen. Trên
-    runner thì ngược lại: mỗi lượt đã là một IP khác rồi, nên cookie mới đi kèm
-    IP mới mới là hình dạng tự nhiên. Bê nguyên jar bền sang đây thành ra một
-    cookie duy nhất nhảy qua 96 IP một ngày — đó mới là thứ đáng ngờ.
-    """
-    c = httpx.Client(headers=boc.HEADERS, timeout=HET_GIO, follow_redirects=True)
-    c.get(boc.BASE + "/")          # bootstrap datr/sb
+    """Jar RỖNG mỗi lượt — cố ý. Runner đổi IP mỗi run nên cookie mới đi kèm IP mới
+    là hình dạng tự nhiên; shno1 cũng dùng jar rỗng cho đồng nhất (3 page/lượt,
+    ~150 GET/ngày, thấp hơn nhiều mức 240 đã đo sạch)."""
+    c = httpx.Client(headers=HEADERS, timeout=HET_GIO, follow_redirects=True)
+    c.get(BASE + "/")          # bootstrap datr/sb — thiếu là FB trả 400 cho mọi GET sau
     return c
 
 
-def mot_nguon(c: httpx.Client, src: dict) -> dict:
-    """Ghé một nguồn. LUÔN trả về dict, không ném — một page hỏng không được
-    làm chết cả lượt, và bản thân "hỏng" cũng là dữ liệu shno1 cần biết."""
-    slug = src["slug"]
-    ra = {"id": src.get("id"), "slug": slug, "name": src.get("name"),
-          "kind": src.get("kind", "page"), "http": None, "bytes": 0,
-          "da_login": False, "benh": None, "loi": None, "posts": []}
+def fetch_httpx(c: httpx.Client, duong_dan: str) -> str:
     try:
-        html = boc.fetch_page(c, src.get("duong_dan") or slug)
-    except boc.FetchError as e:
-        ra["loi"] = str(e)
-        ra["da_login"] = "login" in str(e)
-        return ra
+        r = c.get(f"{BASE}/{duong_dan}")
+    except httpx.HTTPError as e:
+        raise FetchError(f"lỗi mạng: {e}") from e
+    if r.status_code != 200:
+        raise FetchError(f"HTTP {r.status_code}")
+    if "/login" in str(r.url):
+        raise FetchError("bị đá về login")
+    return r.text
 
-    ra["http"] = 200
-    ra["bytes"] = len(html)
-    if src.get("kind") == "group":
-        ds = boc.parse_group_stories(html, str(src["duong_dan"]).split("/")[-1])
-    else:
-        p1 = boc.parse_newest(html)
-        ds = [p1] if p1 else []
 
-    if not ds:
-        # Y HỆT luật canary của shno1: 200 mà bóc 0 bài KHÔNG phải "page không
-        # đăng gì". Chẩn đoán ở đây vì cần cái HTML, nhưng CẢNH BÁO thì để shno1
-        # bắn — Telegram token không được phép có mặt trên runner.
-        ra["benh"] = boc.chan_doan_trang(html)
-        return ra
+# ── đường 2: Playwright vãng lai ───────────────────────────────────────────────
+_pw = None
 
-    for p in ds:
-        ra["posts"].append({
-            "pfbid": p["pfbid"],
-            "url": p["url"],
-            "text": p["text"],
-            "creation_time": p["creation_time"],
-            "dang_luc": p["dang_luc"].isoformat() if p.get("dang_luc") else None,
-            "ghim": p.get("ghim", False),
-        })
+
+def _bat_pw():
+    """Mở Chromium MỘT lần cho cả lượt. Cài thiếu thì tự cài (GHA) — trên shno1 cài
+    sẵn vào .venv một lần: `pip install playwright && playwright install chromium`."""
+    global _pw
+    if _pw is not None:
+        return _pw
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        if not os.environ.get("GITHUB_ACTIONS"):
+            raise FetchError("thiếu playwright — cài vào .venv rồi chạy lại")
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "playwright"], check=True)
+        subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+                       check=True)
+        from playwright.sync_api import sync_playwright
+    p = sync_playwright().start()
+    b = p.chromium.launch(headless=True)
+    ctx = b.new_context(locale="vi-VN", user_agent=UA, viewport={"width": 1280, "height": 900})
+    _pw = (p, b, ctx)
+    return _pw
+
+
+def fetch_pw(duong_dan: str) -> str:
+    _, _, ctx = _bat_pw()
+    pg = ctx.new_page()
+    try:
+        pg.goto(f"{BASE}/{duong_dan}", wait_until="domcontentloaded", timeout=45000)
+        pg.wait_for_timeout(5000)          # cho JS dựng xong khối prefetch
+        if "/login" in pg.url:
+            raise FetchError("bị đá về login (cả PW)")
+        return pg.content()
+    except FetchError:
+        raise
+    except Exception as e:  # noqa: BLE001 — timeout, crash tab
+        raise FetchError(f"PW lỗi: {str(e)[:120]}") from e
+    finally:
+        pg.close()
+
+
+def _tat_pw() -> None:
+    global _pw
+    if _pw:
+        p, b, ctx = _pw
+        try:
+            ctx.close(); b.close(); p.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        _pw = None
+
+
+# ── một nguồn ──────────────────────────────────────────────────────────────────
+def mot_nguon(c: httpx.Client, src: dict) -> dict:
+    """LUÔN trả dict, không ném — một page hỏng không được làm chết cả lượt, và
+    bản thân "hỏng" cũng là dữ liệu n8n cần để báo."""
+    dd = _duong_dan(src)
+    ra = {"id": src.get("id"), "slug": src.get("slug") or dd, "name": src.get("name"),
+          "kind": src.get("kind", "page"), "duong": None, "bytes": 0,
+          "da_login": False, "loi": None, "html": None}
+    try:
+        ra["html"] = fetch_httpx(c, dd)
+        ra["duong"] = "httpx"
+    except FetchError as e1:
+        ra["loi"] = str(e1)
+        ra["da_login"] = "login" in str(e1)
+        # PW chỉ đáng thử khi httpx bị đá login (cấu trúc client), không phải lỗi mạng.
+        if ra["da_login"] or src.get("can_pw"):
+            try:
+                ra["html"] = fetch_pw(dd)
+                ra["duong"], ra["loi"], ra["da_login"] = "pw", None, False
+            except FetchError as e2:
+                ra["loi"] = f"{e1} · {e2}"
+                ra["da_login"] = "login" in str(e2)
+    if ra["html"]:
+        ra["bytes"] = len(ra["html"])
     return ra
+
+
+# ── nguồn ──────────────────────────────────────────────────────────────────────
+def nguon_tu_db() -> list[dict]:
+    import supa  # chỉ shno1 mới có .env Supabase
+    rows = supa._data(supa._client.get(
+        f"{supa.REST}/crawl_sources",
+        params={"select": "id,name,url,kind,can_pw", "is_active": "eq.true",
+                "cao_o": f"eq.{WORKER}", "order": "name"})) or []
+    return [{"id": r["id"], "name": r["name"], "kind": r["kind"], "can_pw": r.get("can_pw"),
+             "slug": r["url"].split("facebook.com/", 1)[-1].strip("/")} for r in rows]
 
 
 def main() -> int:
     kho = "--kho" in sys.argv
-    try:
-        nguon = json.loads(os.environ["NGUON_JSON"])
-    except (KeyError, json.JSONDecodeError) as e:
-        print(f"NGUON_JSON thiếu hoặc hỏng: {e}", file=sys.stderr)
-        return 2
+    luu = sys.argv[sys.argv.index("--luu") + 1] if "--luu" in sys.argv else None
+    if "--tu-db" in sys.argv:
+        nguon = nguon_tu_db()
+    else:
+        try:
+            nguon = json.loads(os.environ.get("NGUON_JSON") or "[]")
+        except json.JSONDecodeError as e:
+            print(f"NGUON_JSON hỏng: {e}", file=sys.stderr)
+            return 2
     if not nguon:
-        print("NGUON_JSON rỗng — không có gì để ghé.", file=sys.stderr)
+        print("Không có nguồn nào để ghé.", file=sys.stderr)
         return 2
 
     ip = ""
@@ -109,27 +228,25 @@ def main() -> int:
         for i, src in enumerate(nguon):
             r = mot_nguon(c, src)
             ket.append(r)
-            trang_thai = (r["loi"] or r["benh"] or f"{len(r['posts'])} bài")
-            print(f"  {r['slug']:36} {r['bytes']:>9,}b  {trang_thai}")
+            print(f"  {r['slug']:36} {r['bytes']:>9,}b  {r['duong'] or '—':5} {r['loi'] or 'ok'}")
+            if luu and r["html"]:
+                os.makedirs(luu, exist_ok=True)
+                with open(os.path.join(luu, f"{r['slug']}.html"), "w", encoding="utf-8") as f:
+                    f.write(r["html"])
             if i < len(nguon) - 1:
-                boc._pause()
+                _pause()
     finally:
         c.close()
+        _tat_pw()
 
-    goi = {
-        "luc": datetime.now(boc.VN).isoformat(),
-        "ip": ip,
-        "repo": os.environ.get("GITHUB_REPOSITORY", "?"),
-        "run_id": os.environ.get("GITHUB_RUN_ID", "?"),
-        "ket": ket,
-    }
-    boc_duoc = sum(1 for r in ket if r["posts"])
-    da_login = sum(1 for r in ket if r["da_login"])
-    print(f"\nIP {ip} · ghé {len(ket)} · bóc được {boc_duoc} · "
-          f"bị đá về login {da_login}")
-
+    goi = {"luc": datetime.now(VN).isoformat(), "ip": ip, "worker": WORKER,
+           "repo": os.environ.get("GITHUB_REPOSITORY", "shno1"),
+           "run_id": os.environ.get("GITHUB_RUN_ID", datetime.now(VN).strftime("%Y%m%d%H%M")),
+           "ket": ket}
+    mo = sum(1 for r in ket if r["html"])
+    print(f"\nIP {ip} · worker {WORKER} · ghé {len(ket)} · mở được {mo} · "
+          f"PW {sum(1 for r in ket if r['duong'] == 'pw')} · hỏng {len(ket) - mo}")
     if kho:
-        print(json.dumps(goi, ensure_ascii=False, indent=1)[:4000])
         return 0
 
     url, token = os.environ.get("N8N_URL"), os.environ.get("N8N_TOKEN")
@@ -137,13 +254,11 @@ def main() -> int:
         print("thiếu N8N_URL/N8N_TOKEN — không đẩy được.", file=sys.stderr)
         return 2
     try:
-        r = httpx.post(url, json=goi, timeout=60,
-                       headers={"X-Selenova-Token": token})
+        r = httpx.post(url, json=goi, timeout=120, headers={"X-Selenova-Token": token})
         r.raise_for_status()
     except httpx.HTTPError as e:
-        # ĐẨY HỎNG THÌ PHẢI ĐỎ CI. Lượt cào coi như mất — không có sổ trên runner
-        # để thử lại, mà im lặng ở đây thì shno1 tưởng "chưa tới giờ" chứ không
-        # biết là mất. Đỏ để còn nhìn thấy trong tab Actions.
+        # ĐẨY HỎNG THÌ PHẢI ĐỎ: worker không có sổ để thử lại, im ở đây là n8n
+        # tưởng "chưa tới giờ" chứ không biết là mất lượt.
         print(f"đẩy về n8n hỏng: {e}", file=sys.stderr)
         return 1
     print(f"đã đẩy về n8n: HTTP {r.status_code}")
