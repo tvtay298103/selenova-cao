@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -127,6 +128,8 @@ def _bat_pw():
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "playwright"], check=True)
         subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
                        check=True)
+        import importlib
+        importlib.invalidate_caches()      # gói vừa cài trong cùng tiến trình
         from playwright.sync_api import sync_playwright
     p = sync_playwright().start()
     b = p.chromium.launch(headless=True)
@@ -136,9 +139,12 @@ def _bat_pw():
 
 
 def fetch_pw(duong_dan: str) -> str:
-    _, _, ctx = _bat_pw()
-    pg = ctx.new_page()
+    """Mọi lỗi (cài thiếu, chromium chưa có, timeout, crash tab) đều gói thành
+    FetchError — một page hỏng ở đường PW không được làm chết cả lượt."""
+    pg = None
     try:
+        _, _, ctx = _bat_pw()
+        pg = ctx.new_page()
         pg.goto(f"{BASE}/{duong_dan}", wait_until="domcontentloaded", timeout=45000)
         pg.wait_for_timeout(5000)          # cho JS dựng xong khối prefetch
         if "/login" in pg.url:
@@ -146,10 +152,11 @@ def fetch_pw(duong_dan: str) -> str:
         return pg.content()
     except FetchError:
         raise
-    except Exception as e:  # noqa: BLE001 — timeout, crash tab
-        raise FetchError(f"PW lỗi: {str(e)[:120]}") from e
+    except Exception as e:  # noqa: BLE001
+        raise FetchError(f"PW lỗi: {type(e).__name__}: {str(e)[:120]}") from e
     finally:
-        pg.close()
+        if pg is not None:
+            pg.close()
 
 
 def _tat_pw() -> None:
@@ -222,8 +229,15 @@ def main() -> int:
     except httpx.HTTPError:
         pass
 
+    url, token = os.environ.get("N8N_URL"), os.environ.get("N8N_TOKEN")
+    if not kho and (not url or not token):
+        print("thiếu N8N_URL/N8N_TOKEN — không đẩy được.", file=sys.stderr)
+        return 2
+    run_id = os.environ.get("GITHUB_RUN_ID", datetime.now(VN).strftime("%Y%m%d%H%M"))
+    repo = os.environ.get("GITHUB_REPOSITORY", "shno1")
+
     c = mo_client()
-    ket = []
+    ket, day_hong = [], 0
     try:
         for i, src in enumerate(nguon):
             r = mot_nguon(c, src)
@@ -231,38 +245,35 @@ def main() -> int:
             print(f"  {r['slug']:36} {r['bytes']:>9,}b  {r['duong'] or '—':5} {r['loi'] or 'ok'}")
             if luu and r["html"]:
                 os.makedirs(luu, exist_ok=True)
-                with open(os.path.join(luu, f"{r['slug']}.html"), "w", encoding="utf-8") as f:
+                ten = re.sub(r"[^A-Za-z0-9._-]+", "_", r["slug"])
+                with open(os.path.join(luu, f"{ten}.html"), "w", encoding="utf-8") as f:
                     f.write(r["html"])
+            # ĐẨY TỪNG PAGE MỘT GÓI, ngay khi ghé xong. Một HTML ~1 MB (PW còn to
+            # hơn); gom 9 page = ~10 MB một POST, sát trần 16 MB mặc định của n8n —
+            # quá là 413 và mất nguyên lượt. Từng gói thì một gói hỏng chỉ mất một page.
+            if not kho:
+                goi = {"luc": datetime.now(VN).isoformat(), "ip": ip, "worker": WORKER,
+                       "repo": repo, "run_id": run_id, "ket": [r]}
+                try:
+                    resp = httpx.post(url, json=goi, timeout=120,
+                                      headers={"X-Selenova-Token": token})
+                    resp.raise_for_status()
+                except httpx.HTTPError as e:
+                    day_hong += 1
+                    print(f"     ✗ đẩy về n8n hỏng: {e}", file=sys.stderr)
             if i < len(nguon) - 1:
                 _pause()
     finally:
         c.close()
         _tat_pw()
 
-    goi = {"luc": datetime.now(VN).isoformat(), "ip": ip, "worker": WORKER,
-           "repo": os.environ.get("GITHUB_REPOSITORY", "shno1"),
-           "run_id": os.environ.get("GITHUB_RUN_ID", datetime.now(VN).strftime("%Y%m%d%H%M")),
-           "ket": ket}
     mo = sum(1 for r in ket if r["html"])
-    print(f"\nIP {ip} · worker {WORKER} · ghé {len(ket)} · mở được {mo} · "
-          f"PW {sum(1 for r in ket if r['duong'] == 'pw')} · hỏng {len(ket) - mo}")
-    if kho:
-        return 0
-
-    url, token = os.environ.get("N8N_URL"), os.environ.get("N8N_TOKEN")
-    if not url or not token:
-        print("thiếu N8N_URL/N8N_TOKEN — không đẩy được.", file=sys.stderr)
-        return 2
-    try:
-        r = httpx.post(url, json=goi, timeout=120, headers={"X-Selenova-Token": token})
-        r.raise_for_status()
-    except httpx.HTTPError as e:
-        # ĐẨY HỎNG THÌ PHẢI ĐỎ: worker không có sổ để thử lại, im ở đây là n8n
-        # tưởng "chưa tới giờ" chứ không biết là mất lượt.
-        print(f"đẩy về n8n hỏng: {e}", file=sys.stderr)
-        return 1
-    print(f"đã đẩy về n8n: HTTP {r.status_code}")
-    return 0
+    print(f"\nIP {ip} · worker {WORKER} · run {run_id} · ghé {len(ket)} · mở được {mo} · "
+          f"PW {sum(1 for r in ket if r['duong'] == 'pw')} · hỏng {len(ket) - mo}"
+          + ("" if kho else f" · đẩy hỏng {day_hong}"))
+    # ĐẨY HỎNG THÌ PHẢI ĐỎ: worker không có sổ để thử lại, im ở đây là n8n tưởng
+    # "chưa tới giờ" chứ không biết là mất gói. Đỏ để còn nhìn thấy ở tab Actions.
+    return 1 if day_hong else 0
 
 
 if __name__ == "__main__":
