@@ -1,0 +1,20 @@
+# TẠM 05/09 — Playwright vãng lai lấy mẫu. Chỉ bấm tay. Xoá khi xong.
+name: pw_mau
+on:
+  workflow_dispatch:
+    inputs:
+      nguon: { description: JSON array nguồn, required: true }
+concurrency: { group: cao, cancel-in-progress: false }
+jobs:
+  pw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install playwright && python -m playwright install --with-deps chromium
+      - run: python pw_mau.py
+        env: { NGUON_TAY: "${{ inputs.nguon }}" }
+      - uses: actions/upload-artifact@v4
+        with: { name: pw-mau, path: mau/, retention-days: 1 }
