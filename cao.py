@@ -197,6 +197,40 @@ def mot_nguon(c: httpx.Client, src: dict) -> dict:
     return ra
 
 
+# ── đẩy về n8n ─────────────────────────────────────────────────────────────────
+NGHI_THU_LAI = (5, 15)   # giây nghỉ trước lần thử 2, 3
+
+
+def day_goi(url: str, token: str, goi: dict, slug: str) -> bool:
+    """POST một gói về n8n, thử lại tối đa 3 lần khi lỗi THOÁNG QUA (timeout, lỗi
+    mạng, 5xx — kể cả 520/524 của Cloudflare). Lỗi 4xx (token sai, 413) thì thôi.
+
+    Vì sao: run private 06/09 09:00 đỏ vì 2/5 gói dính 520 + read timeout dù n8n xử
+    lý mỗi gói 1–2 s và các gói xen kẽ vẫn tới — nghẽn ở đường Azure→Cloudflare→
+    origin, không phải n8n. Thử lại một lần là qua; n8n upsert fb_bai theo sid nên
+    gói tới hai lần cũng vô hại."""
+    for lan in range(1, len(NGHI_THU_LAI) + 2):
+        try:
+            resp = httpx.post(url, json=goi, timeout=120, headers={"X-Selenova-Token": token})
+            resp.raise_for_status()
+            if lan > 1:
+                print(f"     ↻ {slug}: đẩy được ở lần {lan}", file=sys.stderr)
+            return True
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code < 500:
+                print(f"     ✗ {slug}: đẩy về n8n hỏng, không thử lại: {str(e).splitlines()[0]}", file=sys.stderr)
+                return False
+            loi = str(e).splitlines()[0]
+        except httpx.HTTPError as e:      # timeout, đứt kết nối
+            loi = f"{type(e).__name__}: {e}".splitlines()[0]
+        if lan <= len(NGHI_THU_LAI):
+            print(f"     ⚠ {slug}: lần {lan} hỏng ({loi[:80]}) — nghỉ {NGHI_THU_LAI[lan - 1]}s rồi thử lại",
+                  file=sys.stderr)
+            time.sleep(NGHI_THU_LAI[lan - 1])
+    print(f"     ✗ {slug}: đẩy về n8n hỏng sau {lan} lần: {loi}", file=sys.stderr)
+    return False
+
+
 # ── nguồn ──────────────────────────────────────────────────────────────────────
 def nguon_tu_db() -> list[dict]:
     import supa  # chỉ shno1 mới có .env Supabase
@@ -254,13 +288,8 @@ def main() -> int:
             if not kho:
                 goi = {"luc": datetime.now(VN).isoformat(), "ip": ip, "worker": WORKER,
                        "repo": repo, "run_id": run_id, "ket": [r]}
-                try:
-                    resp = httpx.post(url, json=goi, timeout=120,
-                                      headers={"X-Selenova-Token": token})
-                    resp.raise_for_status()
-                except httpx.HTTPError as e:
+                if not day_goi(url, token, goi, r["slug"]):
                     day_hong += 1
-                    print(f"     ✗ đẩy về n8n hỏng: {e}", file=sys.stderr)
             if i < len(nguon) - 1:
                 _pause()
     finally:
