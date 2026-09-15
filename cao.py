@@ -237,15 +237,31 @@ def day_goi(url: str, token: str, goi: dict, slug: str) -> bool:
 # ── nguồn ──────────────────────────────────────────────────────────────────────
 def nguon_tu_db() -> list[dict]:
     import supa  # chỉ shno1 mới có .env Supabase
-    # Nguồn CHÍNH của worker này + nguồn mà worker này ĐỠ HỘ vì vừa hỏng ở worker
-    # chính (`hong_lien_tiep >= 1`, migration 25). Mở được → Inbox đưa đếm về 0 →
-    # lượt sau worker chính tự cào lại. Cùng luật với n8n "00 Nhịp" cho hai worker
-    # GHA — sửa một bên thì sửa bên kia.
+    # Nguồn CHÍNH của worker này + nguồn mà worker này ĐỠ HỘ. Mở được → Inbox đưa
+    # đếm về 0 → lượt sau worker chính tự cào lại. Cùng luật với n8n "00 Nhịp" cho
+    # hai worker GHA — sửa một bên thì sửa bên kia.
+    #
+    # CỬA SỔ ĐỠ HỘ [3, 8] (Tuấn chốt 15/09, thay cho `>= 1`):
+    #
+    # · Sàn 3 = ĐỂ GHA TỰ THỬ LẠI HAI LƯỢT TRƯỚC. Mỗi run GitHub cấp một VM mới nên
+    #   IP mới (đo 12 lượt liên tiếp = 12 IP khác nhau), phần lớn cú rớt Azure tự
+    #   lành ở lượt kế. Ngưỡng `>= 1` làm shno1 nhảy vào quá sớm và gây CÀO ĐÚP:
+    #   đo 15/09, lượt 15:47 public hỏng 7/7 vì IP xấu, thì 16:01 public tự mở lại
+    #   được cả 7 — trong khi shno1 cũng ghé đúng 7 nguồn đó cùng phút. Bảy GET
+    #   thừa lên IP nhà cho việc Azure tự làm xong.
+    #
+    # · Trần 8 = ĐỠ MÃI KHÔNG CỨU ĐƯỢC THÌ THÔI. Page bị xoá / đổi username / bật
+    #   "phải đăng nhập" thì shno1 cũng thua, mà `hong_lien_tiep` cứ tăng ⇒ không có
+    #   trần thì máy nhà ghé một xác chết mỗi lượt, mãi mãi. Sau 8 lượt (~2h40 ở
+    #   nhịp 20') coi như nguồn hỏng thật; cảnh báo "cả hai hạ tầng đều thua" đã bắn
+    #   từ lượt shno1 hỏng đầu tiên nên không ai mất tin. Nguồn sống lại → Inbox đưa
+    #   đếm về 0 → tự vào lại cửa sổ, không cần ai bật tay.
     rows = supa._data(supa._client.get(
         f"{supa.REST}/crawl_sources",
         params={"select": "id,name,url,kind,can_pw", "is_active": "eq.true",
                 "or": f"(cao_o.eq.{WORKER},"
-                      f"and(cao_du_phong.eq.{WORKER},hong_lien_tiep.gte.1))",
+                      f"and(cao_du_phong.eq.{WORKER},"
+                      f"hong_lien_tiep.gte.3,hong_lien_tiep.lte.8))",
                 "order": "name"})) or []
     return [{"id": r["id"], "name": r["name"], "kind": r["kind"], "can_pw": r.get("can_pw"),
              "slug": r["url"].split("facebook.com/", 1)[-1].strip("/")} for r in rows]
