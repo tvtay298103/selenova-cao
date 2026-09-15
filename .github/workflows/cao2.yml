@@ -1,0 +1,49 @@
+# Worker cào FB "public2" — CÙNG repo, CÙNG `cao.py`, khác danh sách nguồn.
+#
+# VÌ SAO CÓ WORKER THỨ HAI (15/09/2026). Tuyến `private` (repo selenova) bị tắt vì
+# nó ăn phút Actions của repo private: đo 24h ngày 15/09 cả repo tiêu ~80 phút/ngày
+# ≈ 2.400'/tháng trên quota 3.000', trong đó `cham.yml` một mình ăn 1.260'. Chạm trần
+# là KHÂU CHẤM chết chứ không phải chỉ khâu cào — nên phải trả phút về cho cham.
+# Nhưng nhịp private 60' (bị ép bởi chính quota đó) làm bài trễ trung bình 30 phút:
+# đo 15/09, bài `doanhoiviencntcnh.ufm` đăng 19:30 mà 20:01 mới cào, tới tay 20:10 —
+# trễ 40', trong khi bài cùng lượt của tuyến public chỉ trễ 9'.
+#
+# Dồn cả 12 nguồn vào một worker thì mỗi lượt MỘT IP phải ghé 12 page, và một IP bị
+# FB đá là mất trắng cả 12. Chia hai worker: hai run song song, hai IP Azure khác
+# nhau, mỗi bên 6 nguồn — hỏng một bên vẫn còn bên kia, và run ngắn hơn.
+#
+# KHÁC cao.yml ĐÚNG HAI CHỖ: `CAO_WORKER: public2` và `concurrency.group: cao2`
+# (chung group là hai workflow tự chặn nhau, mất đúng cái song song vừa dựng).
+# Mọi thứ khác phải giống hệt — sửa cao.py thì cả hai cùng đổi vì dùng chung file.
+#
+# NHỊP KHÔNG Ở ĐÂY. n8n "FB cào 00 Nhịp" bấm workflow_dispatch mỗi 15' và truyền
+# danh sách nguồn (đọc từ crawl_sources.cao_o='public2').
+name: cao2
+
+on:
+  workflow_dispatch:
+    inputs:
+      nguon:
+        description: JSON array nguồn [{id, slug, name, kind, can_pw}] — n8n truyền vào
+        required: true
+
+concurrency:
+  group: cao2
+  cancel-in-progress: false
+
+jobs:
+  cao:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python cao.py
+        env:
+          CAO_WORKER: public2
+          NGUON_JSON: ${{ inputs.nguon }}
+          N8N_URL: ${{ secrets.N8N_URL }}
+          N8N_TOKEN: ${{ secrets.N8N_TOKEN }}
