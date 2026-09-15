@@ -3,7 +3,8 @@
 MỘT script, chạy ở BA nơi (đại tu 05/09/2026):
   · repo public `selenova-cao` (GHA, IP Azure, phút Actions miễn phí)   — nhiều page nhất
   · repo `selenova` private (GHA, cùng dải IP Azure, tốn phút)          — ít page hơn
-  · shno1 (IP FPT residential — hạ tầng khác thật)                      — 3 page
+  · shno1 (IP FPT residential — hạ tầng khác thật)     — nguồn KHÓ + group, và
+    đỡ hộ GHA đúng lượt nào GHA hỏng (`cao_du_phong`, migration 25/27)
 Ba nơi làm ĐÚNG MỘT việc giống nhau. Chỗ này cố ý KHÔNG bóc, KHÔNG regex, KHÔNG sổ,
 KHÔNG khoá Supabase/Telegram. Bóc là việc của n8n (Code node "Bóc Story"), dedup là
 việc của bảng `fb_bai`, báo động là việc của n8n. Mất nguyên worker cũng không mất gì.
@@ -14,7 +15,9 @@ HAI ĐƯỜNG LẤY TRANG, thử theo thứ tự:
      đúng một khối `"__typename":"Story"` (bài mới nhất).
   2. Playwright Chromium headless, vẫn KHÔNG login — chỉ khi (1) bị đẩy về /login.
      Đo 05/09: page id-số (`profile.php?id=…`) httpx bị đá cả 3 dạng URL, Chromium
-     mở được. Page bật "phải đăng nhập" (KetnoiSvvaDn) thì cả hai đều thua → gói lỗi.
+     mở được. Page bật "phải đăng nhập" thì cả hai đều thua → gói lỗi. (KetnoiSvvaDn
+     từng vậy từ IP Azure 05/09, nhưng từ IP FPT của shno1 httpx mở bình thường →
+     06/09 gán cao_o=shno1, chạy ổn.)
   Cả hai đường đều thua ⇒ vẫn GỬI gói (loi + da_login + title) để n8n báo Tuấn.
 
 NGUỒN lấy từ đâu:
@@ -234,10 +237,16 @@ def day_goi(url: str, token: str, goi: dict, slug: str) -> bool:
 # ── nguồn ──────────────────────────────────────────────────────────────────────
 def nguon_tu_db() -> list[dict]:
     import supa  # chỉ shno1 mới có .env Supabase
+    # Nguồn CHÍNH của worker này + nguồn mà worker này ĐỠ HỘ vì vừa hỏng ở worker
+    # chính (`hong_lien_tiep >= 1`, migration 25). Mở được → Inbox đưa đếm về 0 →
+    # lượt sau worker chính tự cào lại. Cùng luật với n8n "00 Nhịp" cho hai worker
+    # GHA — sửa một bên thì sửa bên kia.
     rows = supa._data(supa._client.get(
         f"{supa.REST}/crawl_sources",
         params={"select": "id,name,url,kind,can_pw", "is_active": "eq.true",
-                "cao_o": f"eq.{WORKER}", "order": "name"})) or []
+                "or": f"(cao_o.eq.{WORKER},"
+                      f"and(cao_du_phong.eq.{WORKER},hong_lien_tiep.gte.1))",
+                "order": "name"})) or []
     return [{"id": r["id"], "name": r["name"], "kind": r["kind"], "can_pw": r.get("can_pw"),
              "slug": r["url"].split("facebook.com/", 1)[-1].strip("/")} for r in rows]
 
