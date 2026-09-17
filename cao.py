@@ -267,6 +267,40 @@ def nguon_tu_db() -> list[dict]:
              "slug": r["url"].split("facebook.com/", 1)[-1].strip("/")} for r in rows]
 
 
+# ── KHOÁ: GROUP CHỈ CÀO TỪ IP DÂN CƯ ──────────────────────────────────────────
+def loc_nguon(nguon: list[dict], worker: str) -> tuple[list[dict], list[dict]]:
+    """Trả (giữ lại, bỏ đi). Nguồn `kind=group` mà worker KHÔNG phải shno1 thì bỏ —
+    bỏ TRƯỚC khi ghé, không phải thử rồi mới biết.
+
+    VÌ SAO (Tuấn chốt 17/09/2026). Facebook gate trang LIỆT KÊ của group theo CHỖ
+    ĐỨNG của request, không theo việc có đăng nhập hay không: cùng file này, cùng
+    header, cùng khách vãng lai không cookie —
+        từ IP nhà (shno1) : 351/351 lượt mở được
+        từ IP Azure       : 0/413 lượt, kể cả khi đã mở Chromium thật
+    Tỉ lệ 100%/0% cho biết đó là một PHÉP TRA (dải IP datacenter là danh sách công
+    khai), không phải điểm tín nhiệm tích luỹ — nên IP mới mỗi run cũng vô ích, và
+    Chromium cũng vô ích vì nó đổi cách gõ cửa chứ không đổi chỗ đứng. Page thì
+    ngược lại, mở bình thường từ Azure (2.339/2.366) vì FB muốn máy đọc được page.
+
+    GIÁ ĐÃ TRẢ CHO VIỆC KHÔNG CÓ KHOÁ NÀY: bậc Chromium tốn ~60 giây/lượt, 64
+    lượt/ngày, suốt 10 ngày ≈ 630 phút runner để gõ một cánh cửa khoá sẵn. Không ai
+    thấy vì repo public thì phút Actions miễn phí — hỏng mà không đau thì không ai
+    sửa. Đo được: `cao.yml` TB 103-112 giây/run khi còn group, 44-47 giây sau khi bỏ.
+
+    CHẶN Ở ĐÂY CHỨ KHÔNG Ở CẤU HÌNH — có lý do. Lần trước group tới tay Azure qua
+    HAI đường khác nhau: cột `cao_du_phong='public'` (đặt 07/09) và cột thí nghiệm
+    `cao_ab` (migration 26, đã drop). Một ràng buộc trên `cao_o` sẽ KHÔNG bắt được
+    cả hai. `cao.py` là nơi mọi đường đều phải đi qua, bất kể ai nhét nguồn vào
+    danh sách.
+
+    Muốn bỏ khoá (vd sau này đo được group nào Azure mở được): sửa chính hàm này —
+    tức phải cố ý, có diff, có người duyệt. Đó là điểm của nó."""
+    giu, bo = [], []
+    for s in nguon:
+        (bo if (s.get("kind") == "group" and worker != "shno1") else giu).append(s)
+    return giu, bo
+
+
 def main() -> int:
     kho = "--kho" in sys.argv
     luu = sys.argv[sys.argv.index("--luu") + 1] if "--luu" in sys.argv else None
@@ -281,6 +315,17 @@ def main() -> int:
     if not nguon:
         print("Không có nguồn nào để ghé.", file=sys.stderr)
         return 2
+
+    nguon, bo_group = loc_nguon(nguon, WORKER)
+    for s in bo_group:
+        # In ra, KHÔNG đẩy gói về n8n: đẩy gói hỏng sẽ +1 `hong_lien_tiep` và kéo
+        # theo cảnh báo "nguồn hỏng liên tiếp" — báo động cho một việc mình CỐ Ý
+        # không làm. Bỏ qua phải im lặng với hệ cảnh báo, chỉ ồn trong log.
+        print(f"  ⊘ BỎ QUA {(s.get('slug') or s.get('name') or '?'):34} "
+              f"group chỉ cào từ IP dân cư — worker này là {WORKER}", file=sys.stderr)
+    if not nguon:
+        print("Lượt này chỉ có group → không còn nguồn nào hợp lệ.", file=sys.stderr)
+        return 0
 
     ip = ""
     try:
