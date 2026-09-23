@@ -1,0 +1,35 @@
+# 5-MINUTE POLLING EXPERIMENT — one page (hsvufm), see poll5m.py.
+# EXPIRES 22:00 Vietnam time, 26 Sep 2026: the script stops fetching and the n8n
+# workflow "Selenova — POLL 5m · pacer" stops dispatching. Delete this file afterwards.
+#
+# Paced by n8n (workflow_dispatch), NOT `schedule:` — GitHub cron runs late or drops
+# runs under load, which would mix GitHub's own delay into the measurement.
+name: poll5m
+
+on:
+  workflow_dispatch:
+    inputs:
+      dispatched_at:
+        description: when n8n dispatched this run (ISO) — to measure start-up delay
+        required: false
+
+# fail = give up: if the previous run is still going, cancel it rather than queue.
+concurrency:
+  group: poll5m
+  cancel-in-progress: true
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python poll5m.py
+        env:
+          DISPATCHED_AT: ${{ inputs.dispatched_at }}
+          POLL5M_URL: ${{ secrets.POLL5M_URL }}
+          N8N_TOKEN: ${{ secrets.N8N_TOKEN }}
